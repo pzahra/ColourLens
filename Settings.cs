@@ -15,6 +15,7 @@ internal sealed class Settings
     };
 
     public Deficiency Mode { get; set; } = Deficiency.Deutan;
+    public FilterView View { get; set; } = FilterView.Simulate;
     public float Severity { get; set; } = 1f;
 
     /// <summary>x, y, width, height of the frame in physical pixels.</summary>

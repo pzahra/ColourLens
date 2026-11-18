@@ -23,7 +23,7 @@ internal sealed class FrameWindow : Form
     private static readonly Color AccentColor = Color.FromArgb(76, 194, 255);
     private static readonly Color CloseHoverColor = Color.FromArgb(196, 43, 28);
 
-    private enum Part { None, Mode, Slider, Close }
+    private enum Part { None, Mode, View, Slider, Close }
 
     private readonly LensWindow _lens = new();
     private readonly ContextMenuStrip _menu = new();
@@ -31,10 +31,11 @@ internal sealed class FrameWindow : Form
 
     private Deficiency _mode;
     private Deficiency _lastMode;
+    private FilterView _view;
     private float _severity;
     private Rectangle? _restoreBounds;
 
-    private Rectangle _inner, _modeButton, _slider, _sliderHit, _closeButton;
+    private Rectangle _inner, _modeButton, _viewButton, _slider, _sliderHit, _closeButton;
     private Part _hover;
     private bool _draggingSlider;
 
@@ -43,6 +44,7 @@ internal sealed class FrameWindow : Form
         var settings = Settings.Load();
         _mode = settings.Mode;
         _lastMode = _mode == Deficiency.None ? Deficiency.Deutan : _mode;
+        _view = settings.View;
         _severity = Math.Clamp(settings.Severity, 0f, 1f);
 
         Text = "ColourLens";
@@ -86,7 +88,7 @@ internal sealed class FrameWindow : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        var settings = new Settings { Mode = _mode, Severity = _severity };
+        var settings = new Settings { Mode = _mode, View = _view, Severity = _severity };
         settings.SetBounds(_restoreBounds ?? (WindowState == FormWindowState.Normal ? Bounds : RestoreBounds));
         settings.Save();
         base.OnFormClosing(e);
@@ -151,10 +153,24 @@ internal sealed class FrameWindow : Form
         int modeRight = Math.Min(border + labelWidth + S(16), _closeButton.Left - S(4));
         _modeButton = Rectangle.FromLTRB(border, inset, Math.Max(border, modeRight), inset + partHeight);
 
-        int sliderLeft = _modeButton.Right + S(14);
+        int next = _modeButton.Right, limit = _closeButton.Left - S(8);
+
+        _viewButton = Rectangle.Empty;
+        if (ColorFilters.CanCorrect(_mode))
+        {
+            int viewWidth = Enum.GetValues<FilterView>()
+                .Max(view => TextRenderer.MeasureText(ColorFilters.Label(view), _font).Width) + S(20);
+            if (next + S(6) + viewWidth < limit)
+            {
+                _viewButton = new Rectangle(next + S(6), inset, viewWidth, partHeight);
+                next = _viewButton.Right;
+            }
+        }
+
+        int sliderLeft = next + S(14);
         int percentWidth = TextRenderer.MeasureText("100%", _font).Width;
         int sliderHitRight = sliderLeft + S(SliderPx) + S(10) + percentWidth;
-        if (_mode != Deficiency.None && sliderHitRight < _closeButton.Left - S(8))
+        if (_mode != Deficiency.None && sliderHitRight < limit)
         {
             _slider = new Rectangle(sliderLeft, inset, S(SliderPx), partHeight);
             _sliderHit = Rectangle.FromLTRB(sliderLeft - S(8), inset, sliderHitRight, inset + partHeight);
@@ -199,6 +215,14 @@ internal sealed class FrameWindow : Form
 
     private void ToggleOriginal() => SetMode(_mode == Deficiency.None ? _lastMode : Deficiency.None);
 
+    private void SetView(FilterView view)
+    {
+        _view = view;
+        ApplyEffect();
+    }
+
+    private void CycleView() => SetView((FilterView)(((int)_view + 1) % Enum.GetValues<FilterView>().Length));
+
     private void SetSeverity(float value)
     {
         value = Math.Clamp(MathF.Round(value / SeverityStep) * SeverityStep, 0f, 1f);
@@ -216,8 +240,11 @@ internal sealed class FrameWindow : Form
 
     private void ApplyEffect()
     {
-        _lens.SetEffect(ColorFilters.Effect(_mode, _severity));
-        Text = $"ColourLens – {ColorFilters.Name(_mode, _severity)}";
+        _lens.SetEffect(ColorFilters.Effect(_mode, _view, _severity));
+        var name = ColorFilters.Name(_mode, _severity);
+        Text = ColorFilters.CanCorrect(_mode) && _view != FilterView.Simulate
+            ? $"ColourLens – {name} ({ColorFilters.Label(_view)})"
+            : $"ColourLens – {name}";
         if (IsHandleCreated)
         {
             ArrangeParts();
@@ -253,6 +280,18 @@ internal sealed class FrameWindow : Form
         }
 
         _menu.Items.Add(new ToolStripSeparator());
+        foreach (var view in Enum.GetValues<FilterView>())
+        {
+            var item = new ToolStripMenuItem(ColorFilters.MenuText(view))
+            {
+                Tag = view,
+                ShortcutKeyDisplayString = ViewKey(view).ToString(),
+            };
+            item.Click += (_, _) => SetView(view);
+            _menu.Items.Add(item);
+        }
+
+        _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(new ToolStripMenuItem("Compare with original", null, (_, _) => ToggleOriginal())
         {
             ShortcutKeyDisplayString = "Space",
@@ -268,11 +307,25 @@ internal sealed class FrameWindow : Form
         _menu.Opening += (_, _) =>
         {
             foreach (var item in _menu.Items.OfType<ToolStripMenuItem>())
+            {
                 if (item.Tag is Deficiency kind)
                     item.Checked = kind == _mode;
+                else if (item.Tag is FilterView view)
+                {
+                    item.Checked = view == _view;
+                    item.Enabled = view == FilterView.Simulate || ColorFilters.CanCorrect(_mode);
+                }
+            }
             fill.Checked = _restoreBounds is not null;
         };
     }
+
+    private static Keys ViewKey(FilterView view) => view switch
+    {
+        FilterView.Correct => Keys.C,
+        FilterView.Check => Keys.K,
+        _ => Keys.S,
+    };
 
     // ---- input -----------------------------------------------------------------------------
 
@@ -318,6 +371,7 @@ internal sealed class FrameWindow : Form
 
     private Part PartAt(Point p) =>
         _modeButton.Contains(p) ? Part.Mode :
+        _viewButton.Contains(p) ? Part.View :
         _sliderHit.Contains(p) ? Part.Slider :
         _closeButton.Contains(p) ? Part.Close :
         Part.None;
@@ -361,6 +415,9 @@ internal sealed class FrameWindow : Form
         {
             case Part.Mode:
                 _menu.Show(this, new Point(_modeButton.Left, _modeButton.Bottom));
+                break;
+            case Part.View:
+                CycleView();
                 break;
             case Part.Slider:
                 _draggingSlider = true;
@@ -412,6 +469,9 @@ internal sealed class FrameWindow : Form
             case Keys.Space:
                 ToggleOriginal();
                 return true;
+            case Keys.S or Keys.C or Keys.K:
+                SetView(Enum.GetValues<FilterView>().First(view => ViewKey(view) == keyData));
+                return true;
             default:
                 return base.ProcessCmdKey(ref msg, keyData);
         }
@@ -434,6 +494,18 @@ internal sealed class FrameWindow : Form
         TextRenderer.DrawText(g, ColorFilters.Name(_mode, _severity) + "  ▾", _font, label, TextColor,
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
             TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+
+        if (!_viewButton.IsEmpty)
+        {
+            if (_hover == Part.View)
+                FillRounded(g, _viewButton, HoverColor);
+            using (var path = RoundedPath(Rectangle.FromLTRB(_viewButton.Left, _viewButton.Top, _viewButton.Right - 1, _viewButton.Bottom - 1)))
+            using (var pen = new Pen(OutlineColor))
+                g.DrawPath(pen, path);
+            TextRenderer.DrawText(g, ColorFilters.Label(_view), _font, _viewButton,
+                _view == FilterView.Simulate ? TextColor : AccentColor,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+        }
 
         if (!_slider.IsEmpty)
             PaintSlider(g);
@@ -468,14 +540,20 @@ internal sealed class FrameWindow : Form
 
     private void FillRounded(Graphics g, Rectangle r, Color color)
     {
+        using var path = RoundedPath(r);
+        using var brush = new SolidBrush(color);
+        g.FillPath(brush, path);
+    }
+
+    private GraphicsPath RoundedPath(Rectangle r)
+    {
         int d = S(8);
-        using var path = new GraphicsPath();
+        var path = new GraphicsPath();
         path.AddArc(r.Left, r.Top, d, d, 180, 90);
         path.AddArc(r.Right - d, r.Top, d, d, 270, 90);
         path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
         path.AddArc(r.Left, r.Bottom - d, d, d, 90, 90);
         path.CloseFigure();
-        using var brush = new SolidBrush(color);
-        g.FillPath(brush, path);
+        return path;
     }
 }

@@ -14,7 +14,7 @@ internal sealed class LensWindow : Form
     private static readonly float[] Identity3x3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 16 };
-    private float[] _effect = ColorFilters.Effect(Deficiency.None, 0);
+    private float[] _effect = ColorFilters.Effect(Deficiency.None, FilterView.Simulate, 0);
     private nint _magnifier;
 
     public LensWindow()

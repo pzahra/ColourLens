@@ -2,8 +2,22 @@ namespace ColourLens;
 
 internal enum Deficiency { None, Protan, Deutan, Tritan, Achromat }
 
+internal enum FilterView
+{
+    /// <summary>Show how the screen looks with the deficiency.</summary>
+    Simulate,
+
+    /// <summary>Recolour the screen so someone with the deficiency can tell colours apart.</summary>
+    Correct,
+
+    /// <summary>Correct, then simulate: what the corrected screen looks like with the deficiency.</summary>
+    Check,
+}
+
 internal static class ColorFilters
 {
+    private static readonly float[,] Identity = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+
     // Machado, Oliveira & Fernandes (2009), "A Physiologically-based Model for Simulation of
     // Color Vision Deficiency", severity 1.0. Row-major, column-vector form: rgb' = M · rgb.
     private static readonly float[,] Protanopia =
@@ -35,36 +49,68 @@ internal static class ColorFilters
         { 0.299f, 0.587f, 0.114f },
     };
 
-    /// <summary>
-    /// Builds a MAGCOLOREFFECT for the deficiency. Severity below 1 blends linearly towards normal
-    /// vision, approximating the anomalous (-omaly) forms.
-    /// </summary>
-    public static float[] Effect(Deficiency kind, float severity)
+    // Daltonisation (Fidaner, Lin & Ozguven 2005): corrected = rgb + Shift · (rgb − Sim · rgb).
+    // The error term is what the viewer loses; Shift moves it into channels they can still see.
+    // Red/green loss goes into green and blue.
+    private static readonly float[,] RedGreenShift =
     {
-        var effect = new float[25];
-        for (int i = 0; i < 5; i++)
-            effect[i * 5 + i] = 1f;
+        { 0.0f, 0, 0 },
+        { 0.7f, 1, 0 },
+        { 0.7f, 0, 1 },
+    };
 
-        var matrix = kind switch
+    // Blue/yellow loss goes onto the red-green axis, which tritans still see. (Fidaner's
+    // red/green shift barely helps tritans.)
+    private static readonly float[,] BlueShift =
+    {
+        { 1, 0,  0.7f },
+        { 0, 1, -0.7f },
+        { 0, 0,  0.0f },
+    };
+
+    public static bool CanCorrect(Deficiency kind) => kind is Deficiency.Protan or Deficiency.Deutan or Deficiency.Tritan;
+
+    /// <summary>
+    /// Builds a MAGCOLOREFFECT (5×5, row = input channel, column = output channel). Severity
+    /// below 1 blends the simulation linearly towards normal vision, approximating the anomalous
+    /// (-omaly) forms; correction targets that same severity.
+    /// </summary>
+    public static float[] Effect(Deficiency kind, FilterView view, float severity)
+    {
+        var m = Matrix(kind, view, severity);
+        var effect = new float[25];
+        // MAGCOLOREFFECT is row-vector form (rgb' = rgb · T), so T is the transpose of M.
+        for (int input = 0; input < 3; input++)
+            for (int output = 0; output < 3; output++)
+                effect[input * 5 + output] = m[output, input];
+        effect[3 * 5 + 3] = 1f; // alpha
+        effect[4 * 5 + 4] = 1f; // homogeneous
+        return effect;
+    }
+
+    private static float[,] Matrix(Deficiency kind, FilterView view, float severity)
+    {
+        var simulation = Simulation(kind, Math.Clamp(severity, 0f, 1f));
+        if (view == FilterView.Simulate || !CanCorrect(kind))
+            return simulation;
+
+        var shift = kind == Deficiency.Tritan ? BlueShift : RedGreenShift;
+        var correction = Add(Identity, Multiply(shift, Subtract(Identity, simulation)));
+        return view == FilterView.Correct ? correction : Multiply(simulation, correction);
+    }
+
+    private static float[,] Simulation(Deficiency kind, float severity)
+    {
+        var full = kind switch
         {
             Deficiency.Protan => Protanopia,
             Deficiency.Deutan => Deuteranopia,
             Deficiency.Tritan => Tritanopia,
             Deficiency.Achromat => Monochromacy,
-            _ => null,
+            _ => Identity,
         };
-        if (matrix is null)
-            return effect;
-
-        float s = Math.Clamp(severity, 0f, 1f);
-        // MAGCOLOREFFECT is row-vector form (rgb' = rgb · T), so T is the transpose of M.
-        for (int input = 0; input < 3; input++)
-            for (int output = 0; output < 3; output++)
-            {
-                float identity = input == output ? 1f : 0f;
-                effect[input * 5 + output] = identity + s * (matrix[output, input] - identity);
-            }
-        return effect;
+        // Identity + s · (M − Identity)
+        return Add(Identity, Scale(Subtract(full, Identity), severity));
     }
 
     public static string Name(Deficiency kind, float severity)
@@ -88,4 +134,38 @@ internal static class ColorFilters
         Deficiency.Achromat => "Achromat — no colour vision",
         _ => "Off — normal vision",
     };
+
+    public static string Label(FilterView view) => view.ToString();
+
+    public static string MenuText(FilterView view) => view switch
+    {
+        FilterView.Correct => "Correct — recolour to help someone with it",
+        FilterView.Check => "Check — corrected, as seen with the deficiency",
+        _ => "Simulate — how it looks with the deficiency",
+    };
+
+    private static float[,] Multiply(float[,] a, float[,] b)
+    {
+        var r = new float[3, 3];
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+                for (int k = 0; k < 3; k++)
+                    r[i, j] += a[i, k] * b[k, j];
+        return r;
+    }
+
+    private static float[,] Add(float[,] a, float[,] b) => Map(a, b, (x, y) => x + y);
+
+    private static float[,] Subtract(float[,] a, float[,] b) => Map(a, b, (x, y) => x - y);
+
+    private static float[,] Scale(float[,] a, float s) => Map(a, a, (x, _) => x * s);
+
+    private static float[,] Map(float[,] a, float[,] b, Func<float, float, float> f)
+    {
+        var r = new float[3, 3];
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+                r[i, j] = f(a[i, j], b[i, j]);
+        return r;
+    }
 }
