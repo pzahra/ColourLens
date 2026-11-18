@@ -1,0 +1,83 @@
+# Builds ColourLens as one self-contained ColourLens.exe: no .NET install needed.
+#
+#   push to main, pull request, manual run -> the exe as a workflow artifact
+#   X.Y.Z tag                              -> a GitHub Release holding the exe
+#
+# The version comes from <Version> in ColourLens.csproj, and a tag whose number
+# doesn't match fails before anything is built.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
+  pull_request:
+  workflow_dispatch:
+
+# one run per ref at a time; a newer push supersedes a branch build, never a release
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  build:
+    runs-on: windows-latest      # WinForms (net10.0-windows)
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Tag matches the project version
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          $version = (dotnet msbuild ColourLens.csproj -getProperty:Version).Trim()
+          if ($version -ne $env:GITHUB_REF_NAME) {
+            echo "::error::Tag $env:GITHUB_REF_NAME, but ColourLens.csproj has Version ${version}: bump it, commit, and tag that commit"
+            exit 1
+          }
+
+      # the single-file settings live in the csproj, keyed on a runtime identifier
+      - name: Publish
+        run: dotnet publish ColourLens.csproj -c Release -r win-x64 -o publish
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ColourLens
+          path: publish/ColourLens.exe
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write            # to create the release
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: ColourLens
+          path: dist
+
+      # The tag already exists (it triggered this run), so this attaches the exe to
+      # a release for it. A re-run finds the release made and uploads over it.
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/ColourLens.exe --clobber
+            exit
+          fi
+          cat > notes.md <<'NOTES'
+          Download **ColourLens.exe** and run it: one self-contained file for 64-bit Windows 10 or 11, nothing to install.
+
+          The exe isn't code-signed, so SmartScreen may warn the first time. Choose **More info → Run anyway**.
+          NOTES
+          gh release create "$GITHUB_REF_NAME" dist/ColourLens.exe --title "ColourLens $GITHUB_REF_NAME" --notes-file notes.md --generate-notes --latest

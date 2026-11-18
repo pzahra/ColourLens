@@ -4,15 +4,23 @@ A resizable, always-on-top lens that shows what is underneath it as someone with
 
 ## Run
 
+Download `ColourLens.exe` from [Releases](https://github.com/pzahra/ColourLens/releases) and run it. It's one self-contained file, so nothing needs installing. The exe isn't code-signed, so SmartScreen may warn the first time; choose **More info → Run anyway**.
+
+From source:
+
 ```powershell
 dotnet run -c Release
 ```
 
-Or publish a single exe:
+To build the single exe yourself (it goes in `publish\`):
 
 ```powershell
-dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true
+dotnet publish -c Release -r win-x64 -o publish
 ```
+
+## Release
+
+Bump `<Version>` in `ColourLens.csproj`, commit, then push a matching `X.Y.Z` tag. The [build workflow](.github/workflows/build.yml) publishes the exe and attaches it to a GitHub Release. Pushes to `main` and pull requests build the exe as a workflow artifact.
 
 ## Use
 
